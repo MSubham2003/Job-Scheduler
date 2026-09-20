@@ -5,9 +5,6 @@ on:
     - cron: '0 3 * * *'  # 08:30 AM IST
   workflow_dispatch:
 
-permissions:
-  contents: write  # Allows committing seen_jobs.json
-
 jobs:
   run-crawler:
     runs-on: ubuntu-latest
@@ -28,13 +25,4 @@ jobs:
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python crawler.py
-
-      - name: Commit Seen Jobs State
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add seen_jobs.json
-          git commit -m "chore: update seen jobs state [skip ci]" || echo "No changes to commit"
-          git push
