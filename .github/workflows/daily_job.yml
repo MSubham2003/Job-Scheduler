@@ -2,9 +2,11 @@ name: Daily Java Job Alert
 
 on:
   schedule:
-    # 03:00 UTC = 08:30 AM IST
-    - cron: '0 3 * * *'
-  workflow_dispatch: # Allows manual trigger from GitHub UI anytime
+    - cron: '0 3 * * *'  # 08:30 AM IST
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Allows committing seen_jobs.json
 
 jobs:
   run-crawler:
@@ -21,9 +23,18 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Script & Send Digest
+      - name: Run Crawler Pipeline
         env:
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python crawler.py
+
+      - name: Commit Seen Jobs State
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_jobs.json
+          git commit -m "chore: update seen jobs state [skip ci]" || echo "No changes to commit"
+          git push
