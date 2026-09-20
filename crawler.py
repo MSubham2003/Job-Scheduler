@@ -1,9 +1,10 @@
 import os
+import re
 import json
 import smtplib
-import subprocess
 import requests
 import markdown
+import xml.etree.ElementTree as ET
 import google.generativeai as genai
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -19,140 +20,94 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-DB_FILE = "seen_jobs.json"
-
-# Curated list of high-growth tech & fintech companies
-TARGET_BOARDS = {
-    "greenhouse": [
-        "razorpay", "cred", "swiggy", "postman", "branchmetrics", 
-        "airmeet", "browserstack", "clevertap", "urbancompany", "zepto"
-    ],
-    "lever": [
-        "juspay", "setu", "decentro", "sliceit", "groww", 
-        "fi-money", "kreditbee", "paytmbank"
+def fetch_google_jobs_rss():
+    """Fetches real-time Java/Spring Boot jobs indexed across India in the past 24 hours."""
+    queries = [
+        '("Java" OR "Spring Boot") ("Bhubaneswar" OR "Odisha") (developer OR engineer) when:1d',
+        '("Java" AND "Spring Boot") (backend OR "software engineer") India (remote OR hybrid OR onsite) when:1d',
+        '("Spring Boot" OR "Java microservices") site:linkedin.com/jobs/view when:1d',
+        '("Spring Boot" OR "Java") (fintech OR payments OR backend) India when:1d'
     ]
-}
+    
+    discovered = []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-PROFILE_CRITERIA = """
-[CANDIDATE ARCHETYPE]
-- Role: Java Backend Engineer / Core Systems Engineer
-- Experience Band: 1 - 3 Years (Targeting: SDE 1, SDE 2, Software Engineer, Backend Engineer)
-- Primary Language & Frameworks: Java, Spring Boot, Spring Data JPA, RESTful Microservices[cite: 1]
-
-[TECHNICAL FOUNDATIONS & INFRASTRUCTURE]
-- Persistence & Caching: PostgreSQL, Redis (distributed caching, token caching, asynchronous refresh, cache invalidation)[cite: 1]
-- Distributed Systems & Messaging: Event-driven architecture, Google Cloud Pub/Sub, message retries, async processing, dead-letter pipelines[cite: 1]
-- Cloud & Analytics: GCP (Cloud Logging, Secret Manager, Pub/Sub, BigQuery ETL/ingestion pipelines)[cite: 1]
-- Reliability & Performance: Distributed payment orchestration, idempotency controls, transaction retries, distributed tracing (UUID-based), high-throughput batch/paginated processing[cite: 1]
-
-[SPECIALIZED DOMAIN STRENGTHS (FINTECH & SECURE SYSTEMS)]
-- Payment Standards: BBPS (COU & BOU workflows), ISO 8583 payment messaging, AutoPay scheduling[cite: 1]
-- Hardware Security & Cryptography: HSM integrations, TR-31 key exchange, PIN verification, ZPK/ZAK lifecycle management, AES/RSA symmetric & asymmetric encryption, SSL/TLS, JKS keystores[cite: 1]
-- High-Volume Ingestion: Parsing bulk payment datasets, asynchronous reconciliation, switch invocation, NPCI routing integration[cite: 1]
-
-[EVALUATION RULES & HARD CONSTRAINTS]
-1. HARD DISQUALIFIERS (Set "fit": false, "match_score": 0):
-   - Strict experience requirement > 4 years (e.g., Senior, Lead, Staff, Principal, Architect).
-   - Non-backend roles (Pure Frontend, React/Angular-only, Android/iOS, Manual QA, SDET, pure DevOps/SRE, Data Science).
-   - Backend roles strictly requiring non-Java stacks (e.g., Python/Django only, Node.js only, Go/Rust only) with no Java/JVM footprint.
-   - Unpaid internships or non-engineering listings (DevRel, Tech Support, Operations).
-
-2. HIGH-FIT SIGNALS (Score >= 80):
-   - Core Java / Spring Boot backend microservices.
-   - Distributed systems focusing on concurrency, caching (Redis), relational databases (PostgreSQL), and message queues (Pub/Sub/Kafka/RabbitMQ)[cite: 1].
-   - Fintech, banking, payment gateways, wallets, or transaction security.
-
-3. FLEXIBLE CONSIDERATION (Score 65 - 79):
-   - General backend engineering roles in high-scale domains (E-Commerce, Logistics, SaaS) where core requirements center on Java microservices, API architecture, and database design.
-"""
-
-def load_seen_ids():
-    if os.path.exists(DB_FILE):
+    for q in queries:
+        feed_url = f"https://news.google.com/rss/search?q={requests.utils.quote(q)}&hl=en-IN&gl=IN&ceid=IN:en"
         try:
-            with open(DB_FILE, "r") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+            res = requests.get(feed_url, headers=headers, timeout=12)
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+                for item in root.findall(".//item"):
+                    title = item.find("title").text if item.find("title") is not None else ""
+                    link = item.find("link").text if item.find("link") is not None else ""
+                    desc = item.find("description").text if item.find("description") is not None else ""
+                    
+                    # Clean title and extract company name if present (Title - Company format)
+                    comp = "Tech Company / Job Portal"
+                    clean_title = title
+                    if " - " in title:
+                        parts = title.rsplit(" - ", 1)
+                        clean_title = parts[0]
+                        comp = parts[1]
 
-def save_seen_ids(seen_ids):
-    with open(DB_FILE, "w") as f:
-        json.dump(list(seen_ids), f, indent=2)
+                    # Filter for relevance
+                    if any(k in clean_title.lower() for k in ["java", "spring", "backend", "software", "developer", "sde"]):
+                        discovered.append({
+                            "title": clean_title,
+                            "company": comp,
+                            "url": link,
+                            "content": re.sub(r'<[^>]+>', ' ', desc)[:1200],
+                            "location": "Bhubaneswar / India / Hybrid"
+                        })
+        except Exception as e:
+            print(f"Feed error for query '{q}': {e}")
 
-def fetch_greenhouse_jobs(company):
+    return discovered
+
+def fetch_open_tech_feed():
+    """Secondary feed for real-time remote/hybrid software roles."""
     jobs = []
-    url = f"https://boards-api.greenhouse.io/v1/boards/{company}/jobs?content=true"
+    url = "https://jobicy.com/api/v2/remote-jobs?count=20&tag=java"
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if res.status_code == 200:
-            data = res.json()
-            for item in data.get("jobs", []):
-                title = item.get("title", "")
-                loc = item.get("location", {}).get("name", "")
-                # Fast keyword pre-filter
-                if any(k in title.lower() for k in ["backend", "java", "software", "sde", "engineer"]):
-                    jobs.append({
-                        "id": f"gh_{item['id']}",
-                        "company": company.capitalize(),
-                        "title": title,
-                        "location": loc,
-                        "url": item.get("absolute_url"),
-                        "content": item.get("content", "")[:3500]
-                    })
+            for item in res.json().get("jobs", []):
+                jobs.append({
+                    "title": item.get("jobTitle", "Java Engineer"),
+                    "company": item.get("companyName", "Tech Org"),
+                    "url": item.get("url"),
+                    "content": re.sub(r'<[^>]+>', ' ', item.get("jobDescription", ""))[:1200],
+                    "location": item.get("jobGeo", "India / Remote")
+                })
     except Exception as e:
-        print(f"Greenhouse fetch error for {company}: {e}")
+        print(f"Tech feed error: {e}")
     return jobs
 
-def fetch_lever_jobs(company):
-    jobs = []
-    url = f"https://api.lever.co/v0/postings/{company}?mode=json"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            for item in res.json():
-                title = item.get("text", "")
-                categories = item.get("categories", {})
-                loc = categories.get("location", "")
-                if any(k in title.lower() for k in ["backend", "java", "software", "sde", "engineer"]):
-                    jobs.append({
-                        "id": f"lev_{item['id']}",
-                        "company": company.capitalize(),
-                        "title": title,
-                        "location": loc,
-                        "url": item.get("hostedUrl"),
-                        "content": item.get("descriptionPlain", "")[:3500]
-                    })
-    except Exception as e:
-        print(f"Lever fetch error for {company}: {e}")
-    return jobs
-
-def score_job_with_gemini(job):
+def score_and_enrich_job(job):
+    """Evaluates and matches candidate background using Gemini with token optimization."""
     if not GEMINI_API_KEY:
         return None
 
-    # 1. Fast pre-filter: Skip API calls entirely for obvious non-backend roles
     title_lower = job['title'].lower()
-    disqualified_keywords = ["frontend", "react", "angular", "ios", "android", "intern", "staff", "principal", "qa", "devops"]
-    if any(k in title_lower for k in disqualified_keywords):
+    if any(disqualifier in title_lower for disqualifier in ["frontend", "react", "angular", "intern", "staff", "principal", "qa", "devops", "ios", "android"]):
         return None
 
-    # 2. Trim job content to 1,500 chars (removes footer boilerplate & saves input tokens)
-    clean_content = " ".join(job['content'].split())[:1500]
-
-    # 3. Native schema definition (guarantees valid JSON without prompting tokens)
     response_schema = {
         "type": "object",
         "properties": {
             "fit": {"type": "boolean"},
             "match_score": {"type": "integer"},
             "experience": {"type": "string"},
-            "key_overlap": {
+            "city_location": {"type": "string"},
+            "is_bhubaneswar": {"type": "boolean"},
+            "tech_stack": {
                 "type": "array",
                 "items": {"type": "string"}
             },
-            "reason": {"type": "string"}
+            "short_reason": {"type": "string"}
         },
-        "required": ["fit", "match_score", "experience", "key_overlap", "reason"]
+        "required": ["fit", "match_score", "experience", "city_location", "is_bhubaneswar", "tech_stack", "short_reason"]
     }
 
     model = genai.GenerativeModel(
@@ -164,65 +119,83 @@ def score_job_with_gemini(job):
         }
     )
 
-    # 4. Dense, token-optimized prompt
     prompt = f"""
-    Candidate: Java Backend Engineer (1-3 YOE).
-    Core: Java, Spring Boot, Microservices, PostgreSQL, Redis, GCP Pub/Sub.
-    Domain Strengths: Fintech, BBPS, ISO 8583, HSM/TR-31, distributed idempotency, payment orchestration.
-    Rules:
-    - fit = false if >4 YOE required, non-backend, or strictly non-Java (Node/Python/Go only).
-    - match_score: 80-100 for Java microservices/Fintech; 65-79 for Java SaaS/E-commerce backend; <65 otherwise.
-    - reason: strictly max 15 words.
+Evaluate this job opening for a Java Backend Engineer (1-3 YOE).
+Candidate Strengths: Java, Spring Boot, Microservices, PostgreSQL, Redis, GCP Pub/Sub, Distributed Caching, Fintech (BBPS, ISO 8583, HSM/TR-31, AutoPay, Idempotency).
+Location Preference: Bhubaneswar (Odisha) is preferred highest, followed by Remote/Hybrid or any India tech hub.
 
-    Listing:
-    Company: {job['company']} | Title: {job['title']} | Location: {job['location']}
-    Description: {clean_content}
-    """
+Rules:
+- fit: true if backend role using Java or Spring Boot.
+- fit: false if strictly >4 YOE required, non-backend, or non-JVM stack (Python/Node/Go only).
+- is_bhubaneswar: true if title/description mentions Bhubaneswar or Odisha.
+- match_score: 90-100 for Bhubaneswar or Fintech/Payments Java roles; 75-89 for Spring Boot microservices/caching; 60-74 for general Java backend.
+- short_reason: max 12 words highlighting why it matches.
+
+Listing:
+Title: {job['title']} | Source/Company: {job['company']}
+Details: {job['content']}
+"""
 
     try:
         response = model.generate_content(prompt)
         data = json.loads(response.text)
-        if data.get("fit") and data.get("match_score", 0) >= 65:
+        if data.get("fit") and data.get("match_score", 0) >= 60:
             return {**job, **data}
     except Exception as e:
         print(f"Scoring error for {job['title']}: {e}")
-        
+
     return None
 
 def build_markdown_report(matched_jobs):
     today = datetime.now().strftime("%Y-%m-%d")
-    md = f"# 🚀 Tailored Java Backend Job Alert — {today}\n\n"
-    md += f"_Automated direct-ATS crawler verified against your fintech & Java/Spring Boot profile._\n\n"
+    md = f"# 🚀 Fresh Java & Spring Boot Job Alerts (Past 24 Hours) — {today}\n\n"
+    md += f"_Real-time search across India with priority for Bhubaneswar, Remote, and High-Match Spring Boot roles._\n\n"
     md += "---\n\n"
 
     if matched_jobs:
-        sorted_jobs = sorted(matched_jobs, key=lambda x: x.get("match_score", 0), reverse=True)
-        for idx, job in enumerate(sorted_jobs, 1):
-            score = job.get("match_score")
-            skills = ", ".join(job.get("key_overlap", []))
-            md += f"### {idx}. [{job['title']} @ {job['company']}]({job['url']})\n"
-            md += f"- **Match Score:** `{score}/100` | **Exp:** {job.get('experience')} | **Location:** {job.get('location')}\n"
-            md += f"- **Relevant Tech:** {skills}\n"
-            md += f"- **Why Apply:** {job.get('reason')}\n\n"
+        # Sort: Bhubaneswar roles first, then by match_score descending
+        sorted_jobs = sorted(
+            matched_jobs, 
+            key=lambda x: (x.get("is_bhubaneswar", False), x.get("match_score", 0)), 
+            reverse=True
+        )
+
+        bhubaneswar_jobs = [j for j in sorted_jobs if j.get("is_bhubaneswar")]
+        other_jobs = [j for j in sorted_jobs if not j.get("is_bhubaneswar")]
+
+        if bhubaneswar_jobs:
+            md += "## 📍 Bhubaneswar & Odisha Local Openings\n\n"
+            for idx, job in enumerate(bhubaneswar_jobs, 1):
+                skills = ", ".join(job.get("tech_stack", [])[:4])
+                md += f"### {idx}. [{job['title']}]({job['url']})\n"
+                md += f"- **Company / Source:** {job['company']} | **Score:** `{job.get('match_score')}/100`\n"
+                md += f"- **Location:** 📍 **{job.get('city_location', 'Bhubaneswar')}** | **Exp:** {job.get('experience')}\n"
+                md += f"- **Tech:** {skills}\n"
+                md += f"- **Match:** _{job.get('short_reason')}_\n\n"
+
+        if other_jobs:
+            md += "## 🌐 All-India & Remote / Hybrid Openings (Ranked by Score)\n\n"
+            for idx, job in enumerate(other_jobs, 1):
+                skills = ", ".join(job.get("tech_stack", [])[:4])
+                md += f"### {idx}. [{job['title']}]({job['url']})\n"
+                md += f"- **Company / Source:** {job['company']} | **Score:** `{job.get('match_score')}/100`\n"
+                md += f"- **Location:** {job.get('city_location', 'India')} | **Exp:** {job.get('experience')}\n"
+                md += f"- **Tech:** {skills}\n"
+                md += f"- **Match:** _{job.get('short_reason')}_\n\n"
     else:
-        md += "### 📋 No New Unseen Roles Found Today\n"
-        md += "All existing postings across monitored company boards have already been delivered.\n\n"
+        md += "### 📋 No direct automated matches parsed in the last 24-hour cycle.\n"
+        md += "Use the direct 1-click live filters below for real-time applications.\n\n"
 
-    md += "---\n\n### 🔗 Instant 1-Click Search Feeds (Filtered for Java / Spring Boot 1–3 YOE)\n\n"
-    md += "**General & Enterprise Portals:**\n"
-    md += "- [Naukri (Java + Spring Boot, 1–3 YOE, India)](https://www.naukri.com/java-spring-boot-jobs-in-india?experience=1)\n"
-    md += "- [LinkedIn Jobs (Spring Boot, India, Past 24 Hours)](https://www.linkedin.com/jobs/search/?keywords=Spring%20Boot&location=India&f_TPR=r86400)\n"
-    md += "- [Indeed India (Spring Boot Developer, Past 3 Days)](https://in.indeed.com/jobs?q=Spring+Boot&l=India&fromage=3)\n\n"
+    md += "---\n\n### 🔗 Live 1-Click Search Feeds (Last 24 Hours / 1–3 YOE)\n\n"
+    md += "**Bhubaneswar Focus:**\n"
+    md += "- [Naukri: Java / Spring Boot in Bhubaneswar (Past 24h)](https://www.naukri.com/java-spring-boot-jobs-in-bhubaneswar?experience=1)\n"
+    md += "- [LinkedIn Jobs: Spring Boot Developer in Bhubaneswar (Past 24h)](https://www.linkedin.com/jobs/search/?keywords=Spring%20Boot&location=Bhubaneswar%2C%20Odisha%2C%20India&f_TPR=r86400)\n\n"
+    md += "**All-India & High-Growth Tech:**\n"
+    md += "- [LinkedIn Jobs: All India Spring Boot (Past 24h)](https://www.linkedin.com/jobs/search/?keywords=Spring%20Boot&location=India&f_TPR=r86400)\n"
+    md += "- [Instahyre: Startups Hiring Java Backend](https://www.instahyre.com/search-jobs/?job_functions=software-engineering&skills=Java,Spring%20Boot)\n"
+    md += "- [Hirist: Java & Spring Boot Microservices](https://www.hirist.tech/k/spring-boot-jobs)\n"
+    md += "- [Indeed India: Spring Boot (Past 24h)](https://in.indeed.com/jobs?q=Spring+Boot&l=India&fromage=1)\n"
 
-    md += "**Premium Tech & Startup Portals:**\n"
-    md += "- [Hirist (Tech-Focused: Java & Spring Boot Microservices)](https://www.hirist.tech/k/spring-boot-jobs)\n"
-    md += "- [Instahyre (Curated Startup Matches: Java & Spring Boot)](https://www.instahyre.com/search-jobs/?job_functions=software-engineering&skills=Java,Spring%20Boot)\n"
-    md += "- [Wellfound / AngelList (Early-Stage to Series B Backend Roles)](https://wellfound.com/role/l/backend-engineer/india)\n"
-    md += "- [Cutshort (Direct Recruiter Chat: Java Backend Engineer)](https://cutshort.io/jobs/java-developer-jobs)\n"
-    md += "- [Hasjob (Community & High-Growth Startups: Java)](https://hasjob.co/?q=Java)\n\n"
-
-    md += "**Global & Remote-First Tech:**\n"
-    md += "- [Jobicy (Remote Java Software Engineer Openings)](https://jobicy.com/jobs/remote-java-jobs)\n"
     return md
 
 def send_digest_email(md_content):
@@ -230,20 +203,19 @@ def send_digest_email(md_content):
     msg = MIMEMultipart("mixed")
     msg["From"] = SENDER_EMAIL
     msg["To"] = RECEIVER_EMAIL
-    msg["Subject"] = f"⚡ Daily Java & Fintech Openings — {today}"
+    msg["Subject"] = f"🎯 [24H Digest] Java & Spring Boot Openings — {today}"
 
     html_content = markdown.markdown(md_content)
     styled_html = f"""
     <html>
-      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1a1a1a; max-width: 740px; margin: auto; padding: 25px;">
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #1a1a1a; max-width: 740px; margin: auto; padding: 25px;">
         {html_content}
       </body>
     </html>
     """
     msg.attach(MIMEText(styled_html, "html"))
 
-    # Attach MD file
-    filename = f"java_jobs_{today}.md"
+    filename = f"java_jobs_24h_{today}.md"
     attachment = MIMEBase("application", "octet-stream")
     attachment.set_payload(md_content.encode("utf-8"))
     encoders.encode_base64(attachment)
@@ -253,31 +225,24 @@ def send_digest_email(md_content):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
-    print("Email successfully sent!")
+    print("Email sent successfully!")
 
 if __name__ == "__main__":
-    seen_ids = load_seen_ids()
-    print(f"Loaded {len(seen_ids)} previously indexed jobs.")
+    print("Fetching fresh 24-hour job postings...")
+    all_raw = []
+    all_raw.extend(fetch_google_jobs_rss())
+    all_raw.extend(fetch_open_tech_feed())
 
-    unfiltered_candidates = []
-    # Fetch directly from official ATS APIs
-    for co in TARGET_BOARDS["greenhouse"]:
-        unfiltered_candidates.extend(fetch_greenhouse_jobs(co))
-    for co in TARGET_BOARDS["lever"]:
-        unfiltered_candidates.extend(fetch_lever_jobs(co))
+    # Deduplicate by URL within the same run
+    unique_candidates = {j["url"]: j for j in all_raw if j.get("url")}.values()
+    print(f"Total raw listings fetched: {len(unique_candidates)}")
 
-    # Deduplicate against previous runs
-    new_jobs = [j for j in unfiltered_candidates if j["id"] not in seen_ids]
-    print(f"Discovered {len(new_jobs)} unseen technical postings across monitored boards.")
+    evaluated_matches = []
+    for candidate in unique_candidates:
+        result = score_and_enrich_job(candidate)
+        if result:
+            evaluated_matches.append(result)
 
-    matched_jobs = []
-    for j in new_jobs:
-        evaluated = score_job_with_gemini(j)
-        if evaluated:
-            matched_jobs.append(evaluated)
-        # Mark as seen so you never get duplicate alerts
-        seen_ids.add(j["id"])
-
-    save_seen_ids(seen_ids)
-    report_md = build_markdown_report(matched_jobs)
-    send_digest_email(report_md)
+    print(f"Matched & Scored {len(evaluated_matches)} relevant openings.")
+    digest = build_markdown_report(evaluated_matches)
+    send_digest_email(digest)
