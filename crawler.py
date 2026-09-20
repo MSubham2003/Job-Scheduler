@@ -21,18 +21,18 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 def fetch_google_jobs_rss():
-    """Fetches real-time Java/Spring Boot jobs indexed across India in the past 24 hours."""
+    """Fetches real-time Java/Spring Boot jobs indexed strictly in India in the past 24 hours."""
     queries = [
-        '("Java" OR "Spring Boot") ("Bhubaneswar" OR "Odisha") (developer OR engineer) when:1d',
-        '("Java" AND "Spring Boot") (backend OR "software engineer") India (remote OR hybrid OR onsite) when:1d',
-        '("Spring Boot" OR "Java microservices") site:linkedin.com/jobs/view when:1d',
-        '("Spring Boot" OR "Java") (fintech OR payments OR backend) India when:1d'
+        '("Java" OR "Spring Boot") ("Bhubaneswar" OR "Odisha") when:1d',
+        '("Spring Boot") (developer OR engineer) (India OR Bangalore OR Hyderabad OR Pune) when:1d',
+        '("Java" AND "Spring Boot") (fintech OR payments OR backend) India when:1d'
     ]
     
     discovered = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     for q in queries:
+        # Strict geo-locking to India (gl=IN, hl=en-IN)
         feed_url = f"https://news.google.com/rss/search?q={requests.utils.quote(q)}&hl=en-IN&gl=IN&ceid=IN:en"
         try:
             res = requests.get(feed_url, headers=headers, timeout=12)
@@ -43,22 +43,26 @@ def fetch_google_jobs_rss():
                     link = item.find("link").text if item.find("link") is not None else ""
                     desc = item.find("description").text if item.find("description") is not None else ""
                     
-                    # Clean title and extract company name if present (Title - Company format)
-                    comp = "Tech Company / Job Portal"
+                    comp = "Tech Organization"
                     clean_title = title
                     if " - " in title:
                         parts = title.rsplit(" - ", 1)
                         clean_title = parts[0]
                         comp = parts[1]
 
-                    # Filter for relevance
+                    # Drop obvious foreign locations
+                    foreign_markers = ["australia", "zealand", "nigeria", "united kingdom", "mexico", "canada", "washington", "metropolitan area"]
+                    if any(marker in clean_title.lower() or marker in desc.lower() for marker in foreign_markers):
+                        continue
+
+                    # Filter for technical relevance
                     if any(k in clean_title.lower() for k in ["java", "spring", "backend", "software", "developer", "sde"]):
                         discovered.append({
                             "title": clean_title,
                             "company": comp,
                             "url": link,
                             "content": re.sub(r'<[^>]+>', ' ', desc)[:1200],
-                            "location": "Bhubaneswar / India / Hybrid"
+                            "location": "Bhubaneswar / India / Remote"
                         })
         except Exception as e:
             print(f"Feed error for query '{q}': {e}")
@@ -111,7 +115,7 @@ def score_and_enrich_job(job):
     }
 
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name="gemini-2.5-flash",  # Changed from gemini-1.5-flash as its depricated
         generation_config={
             "response_mime_type": "application/json",
             "response_schema": response_schema,
